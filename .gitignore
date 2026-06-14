@@ -1,0 +1,37 @@
+# Environment variables (chứa API keys)
+.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# Qdrant local database
+qdrant_db/
+
+# Extracted data (large files)
+extracted_chunks.jsonl
+
+# Logs
+*.log
+server_start.log
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Raw Excel data files and folders
+clean_data/
+File_List.xlsx
+*.xlsx
+*.xlsm
+*.xls
