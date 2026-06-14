@@ -13,7 +13,6 @@ Toàn bộ logic được tách vào các module riêng biệt:
 """
 
 import os
-import sys
 import logging
 import time
 import asyncio
@@ -82,25 +81,33 @@ def get_index():
 def health_check():
     """Kiểm tra trạng thái hệ thống — models, Qdrant connection."""
     qdrant_connected = qdrant_client is not None
+    collection_exists = False
     collection_count = None
+    collection_error = None
 
     if qdrant_connected:
         try:
             info = qdrant_client.get_collection("kohler_rag")
             collection_count = info.points_count
-        except Exception:
-            pass
+            collection_exists = True
+        except Exception as e:
+            collection_error = str(e)
 
-    status = "ready" if is_ready() and qdrant_connected else "loading"
     load_error = get_load_error()
+    status = "ready" if is_ready() and qdrant_connected and collection_exists else "loading"
     if load_error:
+        status = "error"
+    if qdrant_connected and not collection_exists:
         status = "error"
 
     return HealthResponse(
         status=status,
         models_ready=is_ready(),
         qdrant_connected=qdrant_connected,
+        collection_exists=collection_exists,
         collection_count=collection_count,
+        collection_error=collection_error,
+        load_error=load_error,
     )
 
 
@@ -153,7 +160,8 @@ async def handle_query(req: QueryRequest):
 
     # ── 2. Search + Rerank Pipeline (chạy trong thread pool để không block event loop) ──
     try:
-        context_str, sources = await asyncio.to_thread(search_and_rerank, query, qdrant_filter)
+        total_start = time.time()
+        context_str, sources, metrics = await asyncio.to_thread(search_and_rerank, query, qdrant_filter)
     except RuntimeError as e:
         logger.error("Qdrant error: %s", e)
         return JSONResponse(
@@ -183,6 +191,7 @@ async def handle_query(req: QueryRequest):
         return {
             "answer": "Không tìm thấy tài liệu phù hợp trong cơ sở dữ liệu với các bộ lọc đã chọn.",
             "sources": [],
+            "metrics": metrics,
         }
 
     # ── 3. Gọi Gemini (kèm history nếu có, chạy trong thread pool) ──
@@ -190,60 +199,32 @@ async def handle_query(req: QueryRequest):
 
     t_start = time.time()
     answer = await asyncio.to_thread(query_gemini, user_prompt, SYSTEM_PROMPT, history)
-    logger.info("💬 Answer generated in %.2fs", time.time() - t_start)
+    gemini_ms = round((time.time() - t_start) * 1000, 2)
+    metrics["gemini_ms"] = gemini_ms
+    metrics["total_ms"] = round((time.time() - total_start) * 1000, 2)
+    logger.info("💬 Answer generated in %.2fs", gemini_ms / 1000)
 
     return {
         "answer": answer,
         "sources": sources,
+        "metrics": metrics,
     }
 
 
 @app.post("/api/reindex")
 async def handle_reindex():
-    """Chạy lại script build_rag_db.py để re-index dữ liệu."""
-    logger.info("🔄 Re-indexing database...")
-
-    # Tìm build script: ưu tiên trong rag_system/, fallback scripts/
-    candidates = [
-        os.path.join(BASE_DIR, "build_rag_db.py"),
-        os.path.join(BASE_DIR, "..", "scripts", "build_rag_db.py"),
-    ]
-    build_script = None
-    for path in candidates:
-        abs_path = os.path.abspath(path)
-        if os.path.exists(abs_path):
-            build_script = abs_path
-            break
-
-    if build_script is None:
-        tried_paths = [os.path.abspath(p) for p in candidates]
-        return JSONResponse(
-            status_code=404,
-            content={
-                "error": f"Không tìm thấy script build tại: {', '.join(tried_paths)}. "
-                         f"Vui lòng đặt file build_rag_db.py tại thư mục scripts/.",
-            },
-        )
-
-    try:
-        import subprocess
-        result = subprocess.run(
-            [sys.executable, build_script],
-            capture_output=True, text=True, encoding="utf-8",
-            timeout=600,  # timeout 10 phút
-        )
-        logger.info(result.stdout)
-        if result.returncode != 0:
-            logger.error("Reindex stderr: %s", result.stderr)
-            return JSONResponse(
-                status_code=500,
-                content={"error": f"Script lỗi: {result.stderr[:500]}"},
-            )
-        return {"status": "success", "output": result.stdout[-500:] if result.stdout else ""}
-    except subprocess.TimeoutExpired:
-        return JSONResponse(status_code=504, content={"error": "Reindex timeout (>10 phút)"})
-    except Exception as e:
-        return JSONResponse(status_code=500, content={"error": str(e)})
+    """Endpoint reindex đã được chuẩn hoá thành hướng dẫn offline an toàn."""
+    return JSONResponse(
+        status_code=501,
+        content={
+            "error": "Reindex online chưa được hỗ trợ trong server runtime.",
+            "recommended_pipeline": [
+                "Chạy rag_system/extract_chunks.py để tạo extracted_chunks.jsonl.",
+                "Chạy rag_system/colab_indexer.py trên Colab/GPU để tạo qdrant_db.zip.",
+                "Giải nén qdrant_db.zip vào rag_system/qdrant_db hoặc chạy migrate_to_cloud.py để upload Qdrant Cloud.",
+            ],
+        },
+    )
 
 
 # ── Main ───────────────────────────────────────────────────────────────

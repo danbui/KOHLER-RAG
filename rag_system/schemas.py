@@ -38,4 +38,7 @@ class HealthResponse(BaseModel):
     status: str
     models_ready: bool
     qdrant_connected: bool
+    collection_exists: bool = False
     collection_count: Optional[int] = None
+    collection_error: Optional[str] = None
+    load_error: Optional[str] = None

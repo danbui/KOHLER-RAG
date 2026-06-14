@@ -5,6 +5,7 @@ phân loại metadata mở rộng, xuất JSONL compact.
 """
 
 import os
+import re
 import sys
 import json
 import time
@@ -24,14 +25,18 @@ _PROJECT_DIR = os.path.dirname(_SCRIPT_DIR)
 SOURCE_DIR  = os.path.join(_PROJECT_DIR, "clean_data")
 OUTPUT_FILE = os.path.join(_SCRIPT_DIR, "extracted_chunks.jsonl")
 
-# Số dòng Excel gộp thành 1 chunk
-EXCEL_GROUP_SIZE = 8
+# Số dòng Excel gộp thành 1 chunk. Mặc định 1 dòng để tối ưu tra cứu SKU/giá.
+EXCEL_GROUP_SIZE = 1
 
 # Kích thước tối thiểu (ký tự) cho 1 chunk PDF dạng paragraph
 PDF_MIN_CHUNK_CHARS = 200
 
 # Tên file cần bỏ qua (lowercase)
 SKIP_FILES = {"search thông tin sản phẩm.xlsm"}
+
+SKU_PATTERN = re.compile(r"(?:[A-Z]+-?\d+[A-Z]*-?\w*|\d+[A-Z]+-?\d*\w*)", re.IGNORECASE)
+YEAR_PATTERN = re.compile(r"(?<!\d)(20\d{2})(?!\d)")
+PRICE_PATTERN = re.compile(r"(?<!\w)(?:VND|VNĐ|₫)?\s*([0-9]{1,3}(?:[.,\s][0-9]{3})+|[0-9]{5,})(?:\s*(?:VND|VNĐ|₫))?", re.IGNORECASE)
 
 # ── Hàm phân loại metadata ──────────────────────────────────────────
 
@@ -62,8 +67,42 @@ def classify_doc_type(rel_path: str) -> str:
     return "Other"
 
 
-def get_year(file_path: str) -> int:
-    """Lấy năm từ thời gian sửa đổi cuối cùng của file."""
+def normalize_sku(sku: str) -> str:
+    """Chuẩn hoá SKU để exact lookup nhất quán giữa query và payload."""
+    return re.sub(r"[^A-Z0-9]", "", sku.upper())
+
+
+def extract_sku_variants(text: str) -> list[str]:
+    """Trích SKU và biến thể không dấu gạch từ text."""
+    variants = []
+    seen = set()
+    for sku in SKU_PATTERN.findall(text):
+        for candidate in (sku.upper(), normalize_sku(sku)):
+            if candidate and candidate not in seen:
+                variants.append(candidate)
+                seen.add(candidate)
+    return variants
+
+
+def extract_price(text: str) -> str:
+    """Trích giá đầu tiên từ text nếu có."""
+    match = PRICE_PATTERN.search(text)
+    return match.group(0).strip() if match else ""
+
+
+def _year_from_text(text: str) -> int | None:
+    years = [int(y) for y in YEAR_PATTERN.findall(text)]
+    return max(years) if years else None
+
+
+def get_year(file_path: str, *text_hints: str) -> int:
+    """Lấy năm từ filename/path/content trước, fallback mtime cuối cùng."""
+    rel_or_name = os.path.basename(file_path)
+    for source in (rel_or_name, file_path, *text_hints):
+        detected = _year_from_text(source or "")
+        if detected:
+            return detected
+
     try:
         mtime = os.path.getmtime(file_path)
         return datetime.fromtimestamp(mtime).year
@@ -75,7 +114,7 @@ def get_year(file_path: str) -> int:
 
 def process_excel(file_path: str, rel_path: str, brand: str, doc_type: str, year: int) -> list[dict]:
     """
-    Đọc từng sheet của file Excel, gom mỗi EXCEL_GROUP_SIZE dòng thành 1 chunk.
+    Đọc từng sheet của file Excel, gom theo row-level/SKU-aware chunks.
     Luôn thêm dòng header ở đầu mỗi chunk để giữ ngữ cảnh cột.
     """
     chunks = []
@@ -129,19 +168,28 @@ def process_excel(file_path: str, rel_path: str, brand: str, doc_type: str, year
                 row_vals = df.iloc[idx].fillna("").astype(str).tolist()
                 lines.append(" | ".join(v.strip() for v in row_vals))
 
+            row_text = "\n".join(lines)
+            sku_variants = extract_sku_variants(row_text)
+            price = extract_price(row_text)
+            chunk_year = get_year(file_path, rel_path, sheet_name, row_text)
+
             content = (
                 f"[File: {rel_path} | Sheet: {sheet_name} | Rows {first_row}-{last_row}]\n"
                 f"Headers: {header_line}\n"
-                + "\n".join(lines)
+                + row_text
             )
 
             chunks.append({
                 "content":     content,
                 "source_file": rel_path,
                 "location":    f"Sheet: {sheet_name} | Rows {first_row}-{last_row}",
-                "year":        year,
+                "year":        chunk_year or year,
                 "brand":       brand,
                 "doc_type":    doc_type,
+                "chunk_type":  "excel_row" if len(group_idx) == 1 else "excel_rows",
+                "sku_variants": sku_variants,
+                "sku":         sku_variants[0] if sku_variants else "",
+                "price":       price,
             })
 
     return chunks
@@ -227,13 +275,18 @@ def process_pdf(file_path: str, rel_path: str, brand: str, doc_type: str, year: 
                     f"[File: {rel_path} | Page {page_num} | Table {t_idx}]\n"
                     + tbl_text
                 )
+                sku_variants = extract_sku_variants(tbl_text)
                 chunks.append({
                     "content":     content,
                     "source_file": rel_path,
                     "location":    f"Page {page_num}, Table {t_idx}",
-                    "year":        year,
+                    "year":        get_year(file_path, rel_path, tbl_text) or year,
                     "brand":       brand,
                     "doc_type":    doc_type,
+                    "chunk_type":  "pdf_table",
+                    "sku_variants": sku_variants,
+                    "sku":         sku_variants[0] if sku_variants else "",
+                    "price":       extract_price(tbl_text),
                 })
         else:
             # Fallback: lấy text và chia paragraph
@@ -247,13 +300,18 @@ def process_pdf(file_path: str, rel_path: str, brand: str, doc_type: str, year: 
                     f"[File: {rel_path} | Page {page_num} | Part {p_idx}]\n"
                     + para_text
                 )
+                sku_variants = extract_sku_variants(para_text)
                 chunks.append({
                     "content":     content,
                     "source_file": rel_path,
                     "location":    f"Page {page_num}, Part {p_idx}",
-                    "year":        year,
+                    "year":        get_year(file_path, rel_path, para_text) or year,
                     "brand":       brand,
                     "doc_type":    doc_type,
+                    "chunk_type":  "pdf_paragraph",
+                    "sku_variants": sku_variants,
+                    "sku":         sku_variants[0] if sku_variants else "",
+                    "price":       extract_price(para_text),
                 })
 
     doc.close()
@@ -301,7 +359,7 @@ def main():
 
             brand    = classify_brand(rel_path)
             doc_type = classify_doc_type(rel_path)
-            year     = get_year(file_path)
+            year     = get_year(file_path, rel_path)
 
             # Xử lý theo loại file
             if ext in (".xlsx", ".xls", ".xlsm"):

@@ -54,9 +54,12 @@ HF_TOKEN=hf_...
 
 # Cấu hình Bật/Tắt Reranker (true: bật, false: tắt để giảm latency)
 ENABLE_RERANKER=false
+RERANK_TIMEOUT_SECONDS=10
+QUERY_EMBEDDING_CACHE_SIZE=256
 
 # Số lượng tài liệu gửi vào context cho Gemini (Mặc định là 3 để giảm 50% context)
 RAG_TOP_K=3
+MAX_CONTEXT_CHARS=6000
 ```
 
 ---
@@ -66,7 +69,7 @@ RAG_TOP_K=3
 ### 1. Cài đặt thư viện cần thiết
 Mở terminal tại thư mục dự án và cài đặt các thư viện Python:
 ```bash
-pip install fastapi uvicorn qdrant-client python-dotenv requests httpx pydantic
+pip install -r requirements.txt
 ```
 
 ### 2. Khởi chạy Backend Server
