@@ -13,6 +13,15 @@ import logging
 # ── Logger ────────────────────────────────────────────────────────────
 logger = logging.getLogger("rag_system.config")
 
+
+def _get_int_env(name: str, default: int) -> int:
+    """Đọc biến môi trường kiểu int với fallback an toàn."""
+    try:
+        return int(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        logger.warning("⚠️ %s không hợp lệ, dùng mặc định: %d", name, default)
+        return default
+
 # ═══════════════════════════════════════════════════════════════
 # 1. UTF-8 stdout (hỗ trợ tiếng Việt trên Windows)
 # ═══════════════════════════════════════════════════════════════
@@ -45,8 +54,9 @@ if not GEMINI_API_KEY:
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.5-flash")
 
 # Số lượng candidates tối đa khi search Qdrant (trước khi rerank)
-CANDIDATE_LIMIT = int(os.getenv("CANDIDATE_LIMIT", "15"))
-RAG_TOP_K = int(os.getenv("RAG_TOP_K", "3"))
+CANDIDATE_LIMIT = _get_int_env("CANDIDATE_LIMIT", 15)
+RAG_TOP_K = _get_int_env("RAG_TOP_K", 3)
+MAX_CONTEXT_CHARS = _get_int_env("MAX_CONTEXT_CHARS", 6000)
 
 
 def get_gemini_url(action: str = "generateContent") -> str:
@@ -74,6 +84,8 @@ HF_API_BASE = "https://api-inference.huggingface.co/models"
 HF_EMBEDDING_MODEL = os.getenv("HF_EMBEDDING_MODEL", "BAAI/bge-m3")
 HF_RERANKER_MODEL = os.getenv("HF_RERANKER_MODEL", "BAAI/bge-reranker-v2-m3")
 ENABLE_RERANKER = os.getenv("ENABLE_RERANKER", "false").lower() in ("true", "1", "yes")
+RERANK_TIMEOUT_SECONDS = _get_int_env("RERANK_TIMEOUT_SECONDS", 10)
+QUERY_EMBEDDING_CACHE_SIZE = _get_int_env("QUERY_EMBEDDING_CACHE_SIZE", 256)
 
 # ═══════════════════════════════════════════════════════════════
 # 5. Cấu hình và kết nối Qdrant (Hỗ trợ Local & Cloud/Server)

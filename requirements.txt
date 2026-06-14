@@ -1,0 +1,16 @@
+fastapi
+uvicorn
+qdrant-client
+python-dotenv
+requests
+httpx
+pydantic
+huggingface-hub
+numpy
+pandas
+PyMuPDF
+openpyxl
+xlrd
+sentence-transformers
+torch
+pytest

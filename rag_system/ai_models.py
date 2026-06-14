@@ -19,12 +19,11 @@ Sử dụng:
         vector = encode_query("câu hỏi của tôi")
 """
 
-import json
 import time
 import logging
 import threading
 import numpy as np
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from functools import lru_cache
 from typing import Optional
 
 from huggingface_hub import InferenceClient
@@ -72,14 +71,17 @@ def _warmup_models() -> None:
         vec = np.array(result)
         logger.info("   ✅ BGE-M3 ready — vector shape: %s (%.1fs)", vec.shape, time.time() - t0)
 
-        # --- Warm up BGE Reranker ---
-        t1 = time.time()
-        logger.info("   ⏳ Warming up BGE Reranker trên HuggingFace...")
-        _hf_client.text_classification(
-            "warmup query",
-            model=config.HF_RERANKER_MODEL,
-        )
-        logger.info("   ✅ Reranker ready (%.1fs)", time.time() - t1)
+        # --- Warm up BGE Reranker (chỉ khi bật để không block startup không cần thiết) ---
+        if config.ENABLE_RERANKER:
+            t1 = time.time()
+            logger.info("   ⏳ Warming up BGE Reranker trên HuggingFace...")
+            _hf_client.text_classification(
+                "warmup query",
+                model=config.HF_RERANKER_MODEL,
+            )
+            logger.info("   ✅ Reranker ready (%.1fs)", time.time() - t1)
+        else:
+            logger.info("   ⚡ Reranker OFF — bỏ qua warmup reranker")
 
         # Đánh dấu sẵn sàng
         with _lock:
@@ -140,6 +142,26 @@ def get_load_error() -> Optional[str]:
         return _load_error
 
 
+@lru_cache(maxsize=config.QUERY_EMBEDDING_CACHE_SIZE)
+def _encode_query_cached(query: str) -> tuple[float, ...]:
+    """Encode query và cache kết quả để giảm latency cho truy vấn lặp lại."""
+    if _hf_client is None:
+        logger.error("HF client chưa được khởi tạo")
+        return ()
+
+    try:
+        result = _hf_client.feature_extraction(
+            query,
+            model=config.HF_EMBEDDING_MODEL,
+        )
+        vec = np.array(result).flatten()
+        return tuple(float(x) for x in vec.tolist())
+
+    except Exception as e:
+        logger.error("HF Embedding API error: %s", e)
+        return ()
+
+
 def encode_query(query: str) -> list:
     """Encode câu truy vấn thành embedding vector qua HuggingFace API.
 
@@ -151,21 +173,7 @@ def encode_query(query: str) -> list:
     Returns:
         list[float] — vector embedding 1024d, hoặc [] nếu có lỗi.
     """
-    if _hf_client is None:
-        logger.error("HF client chưa được khởi tạo")
-        return []
-
-    try:
-        result = _hf_client.feature_extraction(
-            query,
-            model=config.HF_EMBEDDING_MODEL,
-        )
-        vec = np.array(result).flatten()
-        return vec.tolist()
-
-    except Exception as e:
-        logger.error("HF Embedding API error: %s", e)
-        return []
+    return list(_encode_query_cached(query))
 
 
 def rerank_pairs(pairs: list[list[str]]) -> list[float]:
@@ -197,7 +205,7 @@ def rerank_pairs(pairs: list[list[str]]) -> list[float]:
                 "Content-Type": "application/json",
             },
             json={"inputs": inputs},
-            timeout=60,
+            timeout=config.RERANK_TIMEOUT_SECONDS,
         )
         resp.raise_for_status()
 

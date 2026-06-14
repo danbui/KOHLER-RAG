@@ -51,10 +51,12 @@ client.create_collection(
 )
 
 # Tạo payload indexes để tăng tốc lọc khi truy vấn
-print("Tạo payload indexes cho year, brand, doc_type...")
+print("Tạo payload indexes cho year, brand, doc_type, sku_variants...")
 client.create_payload_index(collection_name, 'year', PayloadSchemaType.INTEGER)
 client.create_payload_index(collection_name, 'brand', PayloadSchemaType.KEYWORD)
 client.create_payload_index(collection_name, 'doc_type', PayloadSchemaType.KEYWORD)
+client.create_payload_index(collection_name, 'sku_variants', PayloadSchemaType.KEYWORD)
+client.create_payload_index(collection_name, 'sku', PayloadSchemaType.KEYWORD)
 
 # 3. Tải mô hình BGE-M3 lên GPU
 print("Đang tải mô hình BAAI/bge-m3 lên GPU (CUDA)...")
@@ -94,7 +96,11 @@ for i in range(0, total_chunks, batch_size):
                 "location": item["location"],
                 "year": int(item["year"]),
                 "brand": item["brand"],
-                "doc_type": item["doc_type"]
+                "doc_type": item["doc_type"],
+                "chunk_type": item.get("chunk_type", ""),
+                "sku_variants": item.get("sku_variants", []),
+                "sku": item.get("sku", ""),
+                "price": item.get("price", "")
             }
         )
         points_to_upsert.append(point)
